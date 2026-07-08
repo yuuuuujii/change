@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>普拉托定律 - 点画（Stippling）微生物海报</title>
+    <style>
+        @font-face {
+            font-family: 'HelveticaNeueLight';
+            src: url('./HelveticaNeueLight.otf') format('opentype');
+        }
+        @font-face {
+            font-family: 'HelveticaNeueMedium';
+            src: url('./HelveticaNeueMedium.otf') format('opentype');
+            /* Fallback url or actual if provided, adjust file name as needed */
+        }
+        body { 
+            margin: 0; 
+            padding: 0; 
+            background: #555555;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            overflow: hidden; 
+        }
+        #poster {
+            position: relative;
+            background: #bcbcbc; /* 浅灰色背景 */
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+        canvas, svg { 
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%; 
+            height: 100%;
+            display: block;
+        }
+        svg {
+            z-index: 10; /* SVG 放上层专门处理透明的拖拽交互 */
+        }
+        #hand-cursor {
+            position: absolute;
+            width: 30px;
+            height: 30px;
+            background: transparent;
+            border: none;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000;
+            transform: translate(-50%, -50%);
+            display: none;
+            box-shadow: 0 0 20px 8px rgba(255, 255, 255, 0.4); 
+            transition: transform 0.1s, box-shadow 0.1s;
+        }
+        #hand-cursor.pinched {
+            box-shadow: 0 0 30px 15px rgba(255, 255, 255, 0.8);
+            transform: translate(-50%, -50%) scale(0.6);
+        }
+    </style>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <svg style="width:0;height:0;position:absolute;">
+        <defs>
+            <filter id="goo">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
+                <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7" result="goo" />
+            </filter>
+        </defs>
+    </svg>
+    <div id="poster">
+        <canvas id="blob-layer" style="display: none;"></canvas>
+        <canvas id="render-layer"></canvas>
+        <svg id="hit-layer"></svg>
+        <div id="hand-cursor"></div>
+    </div>
+    <video id="input_video" style="display:none;" autoplay playsinline></video>
+
+    <script>
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        
+        // 绑定 Canvas 层进行纯视觉的渲染
+        const canvasDom = document.getElementById("render-layer");
+        canvasDom.width = width;
+        canvasDom.height = height;
+        const ctx = canvasDom.getContext("2d");
+
+        // 绑定 Blob 融球层
+        const blobDom = document.getElementById("blob-layer");
+        blobDom.width = width;
+        blobDom.height = height;
+        const blobCtx = blobDom.getContext("2d");
+
+        // 绑定 SVG 层仅用于 D3 的热区事件交互
+        const svg = d3.select("#hit-layer").attr("viewBox", [0, 0, width, height]);
+
+        window.addEventListener('resize', () => {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvasDom.width = width;
+            canvasDom.height = height;
+            blobDom.width = width;
+            blobDom.height = height;
+            svg.attr("viewBox", [0, 0, width, height]);
+            if (typeof simulation !== 'undefined') {
+                simulation.force("center", d3.forceCenter(width / 2, height / 2).strength(0.005));
+                simulation.alpha(0.3).restart();
+            }
+        });
+
+        const edgeText = "overthink do laundry eat dinner wash dishes water plants study German attend class watch videos answer emails wait for someone run for the train try again tomorrow hang out with friends ";
+
+        let nodes = [];
+        let nextId = 1;
+
+        let autoAnimationState = "waiting"; 
+        let fallingChars = []; 
+        let currentBubble = null;
+        let typingTimeout = null;
+        let introTextAlphaMultiplier = 1.0;
+
+        window.addEventListener('keydown', (e) => {
+            // 只接受可见字符和退格等，为了简单，我们可以过滤修饰键等
+            if (e.key.length !== 1) return;
+
+            if (!currentBubble) {
+                let startX = width / 2 + (Math.random() - 0.5) * 50;
+                let startY = height / 2 + (Math.random() - 0.5) * 50;
+                
+                // 第3个气泡之后，生成位置更加随机，分布在整个屏幕范围内
+                if (nodes.length >= 3) {
+                    startX = width * 0.1 + Math.random() * (width * 0.8);
+                    startY = height * 0.1 + Math.random() * (height * 0.8);
+                }
+
+                currentBubble = {
+                    id: nextId++,
+                    x: startX,
+                    y: startY,
+                    r: 5,
+                    targetR: 30, // 初始大小
+                    typedText: "",
+                    lastDrawnChars: []
+                };
+                nodes.push(currentBubble);
+
+                // 每次通过打字创建新泡泡后，检查是否超限
+                enforceBubbleLimit();
+
+                simulation.nodes(nodes);
+            }
+
+            // 追加字符
+            currentBubble.typedText += e.key;
+
+            // 增加目标大小，每次打字泡泡变大
+            currentBubble.targetR += 10; 
+
+            let padding = 80;
+            let maxR = Math.min(width, height) / 2 - padding;
+
+            if (currentBubble.targetR > maxR) {
+                burstBubble(currentBubble);
+                currentBubble = null;
+                clearTimeout(typingTimeout);
+            } else {
+                // 重新设置 1.5 秒超时
+                clearTimeout(typingTimeout);
+                typingTimeout = setTimeout(() => {
+                    currentBubble = null;
+                }, 1500);
+            }
+
+            simulation.alpha(0.8).restart();
+        });
+
+        function burstBubble(bubble) {
+            let index = nodes.indexOf(bubble);
+            if (index === -1) return;
+            let removed = nodes.splice(index, 1)[0];
+            
+            if (removed.lastDrawnChars) {
+                for(let charData of removed.lastDrawnChars) {
+                    let dx = charData.x - removed.x;
+                    let dy = charData.y - removed.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    let dirX = dist > 0 ? dx / dist : (Math.random() - 0.5);
+                    let dirY = dist > 0 ? dy / dist : (Math.random() - 0.5);
+                    let force = 15 + Math.random() * 20; 
+                    
+                    fallingChars.push({
+                        x: charData.x,
+                        y: charData.y,
+                        vx: dirX * force + (Math.random() - 0.5) * 5, 
+                        vy: dirY * force + (Math.random() - 0.5) * 10 - 15, 
+                        color: charData.color,
+                        size: charData.size,
+                        char: charData.char
+                    });
+                }
+            }
+            simulation.nodes(nodes);
+            simulation.alpha(0.8).restart();
+        }
+
+        // 限制泡泡上限，超过 12 个则爆破最旧的
+        function enforceBubbleLimit() {
+            while (nodes.length > 12) {
+                burstBubble(nodes[0]);
+            }
+        }
+
+        // ================= 新增：泡泡随机自毁逻辑 =================
+        function scheduleRandomBurst() {
+            // 延长了随机时间： 8000毫秒(8秒) 到 15000毫秒(15秒) 之间，让破碎变得更加舒缓偶尔
+            let randomDelay = 8000 + Math.random() * 7000; 
+            
+            setTimeout(() => {
+                // 修改：仅当泡泡总数大于等于 5 个时才允许随机破碎
+                if (nodes.length >= 5) {
+                    // 筛选出可以被戳破的泡泡（排除掉当前正在打字的那个）
+                    let burstableNodes = nodes.filter(n => n !== currentBubble);
+                    
+                    if (burstableNodes.length > 0) {
+                        let randomIndex = Math.floor(Math.random() * burstableNodes.length);
+                        burstBubble(burstableNodes[randomIndex]);
+                    }
+                }
+                // 无限循环：安排下一次的检测
+                scheduleRandomBurst();
+            }, randomDelay);
+        }
+        
+        // 启动随机破碎定时器
+        scheduleRandomBurst();
+        // ==========================================================
+
+        // 伪随机数用于生成固定的位置噪声
+        function pseudoRandom(seedA, seedB) {
+            let t = Math.sin(seedA * 12.9898 + seedB * 78.233) * 43758.5453123;
+            return t - Math.floor(t);
+        }
+
+        // 计算有机感的点画圆点半径
+        function getRadius(seedA, seedB) {
+            let noise = pseudoRandom(seedA, seedB); // 0 ~ 1 之间
+            let wave = Math.sin(seedA * 0.08) * Math.cos(seedB * 0.08); // -1 ~ 1 之间
+            // 将点画圆点的大小放大4倍（在之前放大的基础上再放大一倍）
+            return Math.max(2, (1.5 + noise * 4.5 + wave * 2) * 4.0); 
+        }
+
+        // Sutherland-Hodgman 多边形半平面裁剪算法
+        function clipPolygon(poly, px, py, nx, ny) {
+            if (!poly || poly.length === 0) return [];
+            let out = [];
+            for (let i = 0; i < poly.length; i++) {
+                let cur = poly[i];
+                let prev = poly[(i === 0 ? poly.length - 1 : i - 1)];
+                
+                let dCur = (cur[0] - px) * nx + (cur[1] - py) * ny;
+                let dPrev = (prev[0] - px) * nx + (prev[1] - py) * ny;
+                
+                if (dCur * dPrev < 0) {
+                    let t = dPrev / (dPrev - dCur);
+                    let ix = prev[0] + t * (cur[0] - prev[0]);
+                    let iy = prev[1] + t * (cur[1] - prev[1]);
+                    out.push([ix, iy]);
+                }
+                
+                if (dCur <= 0) {
+                    out.push(cur);
+                }
+            }
+            return out;
+        }
+
+        // 动态表面张力物理模型
+        function surfaceTensionForce(alpha) {
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    let n1 = nodes[i], n2 = nodes[j];
+                    let sumR = n1.r + n2.r;
+                    
+                    let dx = n2.x - n1.x;
+                    let dy = n2.y - n1.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    if (dist === 0) continue;
+
+                    if (dist < sumR * 1.2) { 
+                        let target = sumR * 0.86; 
+                        let diff = dist - target; 
+                        
+                        let force = diff * 0.15 * alpha; 
+                        let fx = (dx/dist) * force;
+                        let fy = (dy/dist) * force;
+                        
+                        let m1 = n1.r * n1.r;
+                        let m2 = n2.r * n2.r;
+                        let mSum = m1 + m2;
+                        
+                        n1.vx += fx * (m2 / mSum);
+                        n2.vx -= fx * (m1 / mSum);
+                    }
+                }
+            }
+        }
+
+        const simulation = d3.forceSimulation(nodes)
+            .force("charge", d3.forceManyBody().strength(-30)) 
+            .force("center", d3.forceCenter(width / 2, height / 2).strength(0.005))
+            .force("surfaceTension", surfaceTensionForce)
+            .force("wander", () => {
+                let time = Date.now() * 0.001;
+                for(let n of nodes) {
+                    // 为每个气泡添加有正弦周期变化且基于独立ID微调相位的微小推力，产生像风吹过或者水面漂浮的有机滑动感
+                    n.vx += Math.sin(time + n.id) * 0.15;
+                    n.vy += Math.cos(time * 0.8 + n.id * 1.5) * 0.15;
+                }
+            })
+            .force("boundary", () => {
+                let padding = 80; // 增大安全边距，防止由于文字生成在圆形外部产生越界或者变形
+                for(let n of nodes) {
+                    // 当泡泡很大时，限制其位置不要超出屏幕边缘
+                    n.x = Math.max(n.r + padding, Math.min(width - n.r - padding, n.x));
+                    n.y = Math.max(n.r + padding, Math.min(height - n.r - padding, n.y));
+                }
+            })
+            .alphaDecay(0.01)
+            .alphaTarget(0.02) // 设定一个永远不会彻底降为0的最小目标活动度，让物理模拟永远保持非常轻柔的运行，实现永久漂浮
+            .on("tick", render);
+
+        const drag = d3.drag()
+            .on("start", (event, d) => {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x; d.fy = d.y;
+            })
+            .on("drag", (event, d) => {
+                d.fx = event.x; d.fy = event.y;
+            })
+            .on("end", (event, d) => {
+                if (!event.active) simulation.alphaTarget(0.02); // 放开鼠标拖拽后，目标恢复到静息漂浮状态而不是写死的 0
+                d.fx = null; d.fy = null;
+            });
+
+        d3.select("#poster").on("dblclick", (event) => {
+            let pointer = d3.pointer(event, svg.node());
+            nodes.push({
+                id: nextId++,
+                x: pointer[0] || (width/2 + (Math.random()-0.5)*100),
+                y: pointer[1] || (height/2 + (Math.random()-0.5)*100),
+                r: 5,
+                targetR: 40 + Math.random() * 260, // 缩小尺寸基数和上限，使其能容纳更多数量：40到300
+                typedText: " ",
+                lastDrawnChars: []
+            });
+            
+            // 每次双击创建新泡泡后，检查是否超限
+            enforceBubbleLimit();
+            
+            simulation.nodes(nodes);
+            simulation.alpha(1).restart();
+        });
+
+        // 基于 Canvas / Path Sampling 渲染管线
+        function render() {
+            let drawnTextBounds = []; // 用于全局检测并防止当前帧渲染的文字发生重叠
+
+            nodes.forEach(n => {
+                n.lastDrawnChars = []; // 重置该帧渲染的字符记录
+                if (n.targetR && n.r < n.targetR) {
+                    n.r += (n.targetR - n.r) * 0.2; // 加大生长系数，使得每个气泡更快膨胀到位
+                }
+            });
+
+            // 清理上一阵
+            ctx.clearRect(0, 0, width, height);
+            blobCtx.clearRect(0, 0, width, height);
+
+            nodes.forEach(n => {
+                let poly = [ [-200, -200], [width+200, -200], [width+200, height+200], [-200, height+200] ];
+                let planes = []; // 存储当前气泡的半平面参数，用于判断外弧裁剪
+
+                for(let j of nodes) {
+                    if (n === j) continue;
+                    let dx = j.x - n.x;
+                    let dy = j.y - n.y;
+                    let d2 = dx*dx + dy*dy;
+                    if(d2 === 0) continue;
+                    
+                    let d = Math.sqrt(d2);
+                    if(d > n.r + j.r) continue; 
+                    
+                    let d_i = (d2 + n.r*n.r - j.r*j.r) / (2*d);
+                    let px = n.x + dx * d_i / d;
+                    let py = n.y + dy * d_i / d;
+                    let nx = dx / d;
+                    let ny = dy / d;
+                    
+                    planes.push({px, py, nx, ny, neighborId: j.id});
+                    poly = clipPolygon(poly, px, py, nx, ny);
+                }
+                
+                // 1. 点画化渲染：内部 Voronoi 相交线（普拉托边界）
+                for (let i = 0; i < poly.length; i++) {
+                    let p1 = poly[i];
+                    let p2 = poly[(i === poly.length - 1) ? 0 : i + 1];
+                    
+                    // 统一两点间的方向 (防止共享边产生不对齐的采样偏移导致双重叠影)
+                    let pA = p1, pB = p2;
+                    if (pA[0] > pB[0] || (pA[0] === pB[0] && pA[1] > pB[1])) {
+                        pA = p2; pB = p1;
+                    }
+                    
+                    let dx = pB[0] - pA[0];
+                    let dy = pB[1] - pA[1];
+                    let len = Math.sqrt(dx*dx + dy*dy);
+                    if (len === 0) continue;
+                    
+                    // 找出这条边对应的 neighborId
+                    let midX = (pA[0] + pB[0]) / 2;
+                    let midY = (pA[1] + pB[1]) / 2;
+                    let neighborId = 0;
+                    for (let plane of planes) {
+                        let dCur = (midX - plane.px) * plane.nx + (midY - plane.py) * plane.ny;
+                        if (Math.abs(dCur) < 0.1) {
+                            neighborId = plane.neighborId;
+                            break;
+                        }
+                    }
+                    
+                    let currentDist = 0;
+                    let k = 0;
+                    while (currentDist < len) {
+                        let seedA = n.id + neighborId * 1000;
+                        let seedB = k;
+                        let r = getRadius(seedA, seedB);
+                        let totalR = r + 4; // 包含绿边外环 (描边加粗到4px)
+                        
+                        let centerDist = currentDist + totalR;
+                        currentDist += totalR * 2 - 0.2; // 前进这颗球占据的总直径距离 (稍微相交0.2避免白缝)
+                        
+                        if (centerDist > len) break;
+                        
+                        let t = centerDist / len;
+                        let ptX = pA[0] + dx * t;
+                        let ptY = pA[1] + dy * t;
+                        k++;
+                        
+                        // 只渲染在自身圆半径内的部分，半径扩大 +4 防止间隙穿帮
+                        let dist2 = (ptX - n.x)*(ptX - n.x) + (ptY - n.y)*(ptY - n.y);
+                        if (dist2 <= (n.r + 4) * (n.r + 4)) {
+                            let hasBlob = pseudoRandom(seedA, seedB + 1111) < 0.6; // 60%概率有黑色融球底色
+                            
+                            if (hasBlob) {
+                                blobCtx.fillStyle = "#ffffff"; // 泡泡变回纯白
+                                blobCtx.beginPath();
+                                blobCtx.arc(ptX, ptY, r + 4, 0, Math.PI * 2);
+                                blobCtx.fill();
+                            }
+
+                            // 记录数据/基因编码数字位置：文字去重与交点留白
+                            if (n.id < neighborId && centerDist >= 15 && (len - centerDist) >= 15) {
+                                let fontSize = Math.max(16, r * 1.8);
+                                let isOverlap = false;
+                                for (let b of drawnTextBounds) {
+                                    let dx = ptX - b.x; let dy = ptY - b.y;
+                                    // 两个字符的半径之和作为碰撞距离阈值
+                                    if (dx*dx + dy*dy < (fontSize * 0.45 + b.r) * (fontSize * 0.45 + b.r)) { 
+                                        isOverlap = true; break; 
+                                    }
+                                }
+                                if (!isOverlap) {
+                                    drawnTextBounds.push({x: ptX, y: ptY, r: fontSize * 0.45});
+                                    let textSource = n.typedText && n.typedText.length > 0 ? n.typedText : " ";
+                                    let charText = textSource[k % textSource.length];
+                                    n.lastDrawnChars.push({ x: ptX, y: ptY, char: charText, size: fontSize, hasBlob: hasBlob });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. 点画化渲染：外部圆弧 (未被多边形裁剪截断的部分)
+                let c = 2 * Math.PI * n.r;
+                let currentDist = 0;
+                let k = 0;
+                while (currentDist < c) {
+                    let seedA = n.id * 1000;
+                    let seedB = k;
+                    let r = getRadius(seedA, seedB);
+                    let totalR = r + 4; // 描边加粗到4px
+                    
+                    let centerDist = currentDist + totalR;
+                    currentDist += totalR * 2 - 0.2; // 前进一步，紧密排列
+                    
+                    if (centerDist > c) break;
+                    
+                    let a = (centerDist / c) * Math.PI * 2;
+                    let ox = n.x + n.r * Math.cos(a);
+                    let oy = n.y + n.r * Math.sin(a);
+                    k++;
+                    
+                    // 检测此采样点是否在此节点的安全多边形内
+                    let isClipped = false;
+                    for (let plane of planes) {
+                        let dCur = (ox - plane.px) * plane.nx + (oy - plane.py) * plane.ny;
+                        if (dCur > 0.5) { // 加上 0.5 距离容差防止拐角误判
+                            isClipped = true;
+                            break;
+                        }
+                    }
+                    
+                    if (!isClipped) {
+                        let seedA = n.id * 1000;
+                        let seedB = k;
+                        let r = getRadius(seedA, seedB);
+                        
+                        let hasBlob = pseudoRandom(seedA, seedB + 1111) < 0.6; // 60%概率有黑色融球底色
+                        
+                        if (hasBlob) {
+                            blobCtx.fillStyle = "#ffffff"; // 泡泡变回纯白
+                            blobCtx.beginPath();
+                            blobCtx.arc(ox, oy, r + 4, 0, Math.PI * 2);
+                            blobCtx.fill();
+                        }
+
+                        // 记录数据/基因编码数字位置
+                        let fontSize = Math.max(16, r * 1.8);
+                        let isOverlap = false;
+                        for (let b of drawnTextBounds) {
+                            let dx = ox - b.x; let dy = oy - b.y;
+                            if (dx*dx + dy*dy < (fontSize * 0.45 + b.r) * (fontSize * 0.45 + b.r)) { 
+                                isOverlap = true; break; 
+                            }
+                        }
+                        if (!isOverlap) {
+                            drawnTextBounds.push({x: ox, y: oy, r: fontSize * 0.45});
+                            let textSource = n.typedText && n.typedText.length > 0 ? n.typedText : " ";
+                            let charText = textSource[k % textSource.length];
+                            n.lastDrawnChars.push({ x: ox, y: oy, char: charText, size: fontSize, hasBlob: hasBlob });
+                        }
+                    }
+                }
+            });
+
+            // ================= 合并与文字镂空渲染 =================
+            // 1. 先将带有白底泡泡的离屏 Canvas 加上 SVG 融球滤镜后画到主画面上
+            ctx.filter = "url(#goo)";
+            ctx.drawImage(blobDom, 0, 0);
+            ctx.filter = "none";
+
+            // 2. 统一渲染文字
+            nodes.forEach(n => {
+                if (!n.lastDrawnChars) return;
+                n.lastDrawnChars.forEach(charData => {
+                    ctx.font = `${charData.size}px 'HelveticaNeueMedium', Arial, sans-serif`;
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+
+                    if (charData.hasBlob) {
+                        // 文字长在白底泡泡内部 -> 使用 destination-out 擦除白色像素，实现真实的镂空透背
+                        ctx.globalCompositeOperation = "destination-out";
+                        ctx.fillText(charData.char, charData.x, charData.y);
+                        // 恢复正常绘制模式
+                        ctx.globalCompositeOperation = "source-over";
+                    } else {
+                        // 文字长在外面无底区域 -> 直接正常绘制成白色
+                        ctx.fillStyle = "#ffffff";
+                        ctx.fillText(charData.char, charData.x, charData.y);
+                    }
+                });
+            });
+
+            // 保持原本 D3 的热区事件交互图层同步 (透明的操控圆)
+            let hits = svg.selectAll("circle.hit").data(nodes, d => d.id);
+            let hitsEnter = hits.enter().append("circle").attr("class", "hit")
+                .attr("fill", "transparent")
+                .style("cursor", "grab")
+                .call(drag)
+                .on("wheel", (event, d) => {
+                    event.preventDefault(); 
+                    let delta = event.deltaY < 0 ? 12 : -12;
+                    d.r = Math.max(30, Math.min(400, d.r + delta));
+                    simulation.alpha(0.5).restart(); 
+                });
+                
+            hits.merge(hitsEnter)
+                .attr("cx", d => d.x).attr("cy", d => d.y).attr("r", d => d.r);
+            hits.exit().remove();
+
+            // ================= 额外绘制：掉落的破裂字符 =================
+            for (let i = fallingChars.length - 1; i >= 0; i--) {
+                let fc = fallingChars[i];
+                
+                // 物理运动计算
+                fc.vy += 4; // 超大重力加速度，让掉落变得异常干脆和迅速
+                fc.x += fc.vx; // 加上水平速度计算
+                fc.y += fc.vy;
+                
+                // 空气阻力减速横向炸飞速度
+                fc.vx *= 0.92;
+                
+                // 如果掉出屏幕下方太远，则销毁
+                if (fc.y > height + 100) {
+                    fallingChars.splice(i, 1);
+                    continue;
+                }
+                
+                ctx.save();
+                ctx.translate(fc.x, fc.y);
+                
+                ctx.fillStyle = "#ffffff"; // 掉落时的文字统一为纯白色
+                ctx.font = `${fc.size}px 'HelveticaNeueMedium', Arial, sans-serif`;
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(fc.char, 0, 0);
+                // 移除所有的外描边逻辑
+                
+                ctx.restore();
+            }
+
+            if (nodes.length === 0) {
+                // 如果没有泡泡，逐渐恢复透明度乘数（渐现）
+                introTextAlphaMultiplier = Math.min(1.0, introTextAlphaMultiplier + 0.02);
+            } else {
+                // 如果有泡泡，快速降低透明度乘数（快速渐隐）
+                introTextAlphaMultiplier = Math.max(0.0, introTextAlphaMultiplier - 0.1);
+            }
+
+            if (introTextAlphaMultiplier > 0) {
+                let time = Date.now() * 0.001; // 转换为秒
+                // 计算基本呼吸透明度，再乘上整体的透明度系数
+                let baseAlpha = 0.4 + 0.3 * Math.sin(time * 1.5); 
+                let finalAlpha = baseAlpha * introTextAlphaMultiplier;
+                
+                ctx.save();
+                ctx.fillStyle = `rgba(255, 255, 255, ${finalAlpha})`;
+                ctx.font = "24px 'HelveticaNeueLight', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText("Type something occupying your mind.", width / 2, height / 2);
+                ctx.restore();
+            }
+        }
+
+        // 导出 SVG 逻辑
+        function downloadSVG() {
+            let blobElements = "";
+            let textElements = "";
+
+            let originalBlobArc = blobCtx.arc;
+            let originalCtxFillText = ctx.fillText;
+            
+            blobCtx.arc = function(x, y, radius, startAngle, endAngle) {
+                blobElements += `<circle cx="${x}" cy="${y}" r="${radius}" fill="${blobCtx.fillStyle}" />\n`;
+                originalBlobArc.call(blobCtx, x, y, radius, startAngle, endAngle);
+            };
+            
+            ctx.fillText = function(text, x, y, maxWidth) {
+                let fontSize = 8;
+                let match = ctx.font.match(/(\d+(?:\.\d+)?)px/);
+                if (match) fontSize = Number(match[1]);
+                let charText = text === '<' ? '&lt;' : text === '>' ? '&gt;' : text === '&' ? '&amp;' : text;
+                textElements += `<text x="${x}" y="${y}" fill="${ctx.fillStyle}" font-family="Arial, sans-serif" font-size="${fontSize}px" font-weight="bold" text-anchor="middle" dy="0.35em">${charText}</text>\n`;
+                if(maxWidth !== undefined){
+                    originalCtxFillText.call(ctx, text, x, y, maxWidth);
+                } else {
+                    originalCtxFillText.call(ctx, text, x, y);
+                }
+            };
+
+            // 触发一次纯净的渲染流以捕获图形
+            render();
+
+            // 恢复内置方法
+            blobCtx.arc = originalBlobArc;
+            ctx.fillText = originalCtxFillText;
+
+            // 1. 生成带有滤镜的纯底图临时 SVG
+            let tempSvgStr = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <defs>
+      <filter id="gooexport">
+          <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur" />
+          <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7" result="gooexport" />
+      </filter>
+  </defs>
+  <g filter="url(#gooexport)">
+${blobElements}  </g>
+</svg>`;
+
+            const tempBlob = new Blob([tempSvgStr], {type: 'image/svg+xml;charset=utf-8'});
+            const tempUrl = URL.createObjectURL(tempBlob);
+            
+            const img = new Image();
+            img.onload = function() {
+                // 2. 转换为高清位图
+                const exportCanvas = document.createElement('canvas');
+                exportCanvas.width = width * 2;
+                exportCanvas.height = height * 2;
+                const exportCtx = exportCanvas.getContext('2d');
+                exportCtx.scale(2, 2);
+                exportCtx.drawImage(img, 0, 0, width, height);
+
+                const dataURL = exportCanvas.toDataURL('image/png');
+                
+                // 3. 混合拼装最终的正式 SVG 字符串
+                let finalSvgStr = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
+  <rect width="100%" height="100%" fill="#eaeaea" />
+  <image xlink:href="${dataURL}" width="${width}" height="${height}" />
+  <g>
+${textElements}  </g>
+</svg>`;
+
+                // 4. 下载逻辑
+                const finalBlob = new Blob([finalSvgStr], {type: 'image/svg+xml;charset=utf-8'});
+                const finalUrl = URL.createObjectURL(finalBlob);
+
+                const link = document.createElement('a');
+                link.href = finalUrl;
+                link.download = 'poster-hybrid.svg';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                URL.revokeObjectURL(tempUrl);
+                URL.revokeObjectURL(finalUrl);
+            };
+            img.src = tempUrl;
+        }
+
+        // ================= 摄像头手势识别与交互 =================
+        const videoElement = document.getElementById('input_video');
+        const cursorElement = document.getElementById('hand-cursor');
+
+        let smoothedX = width / 2;
+        let smoothedY = height / 2;
+        let prevZ = null;
+        let prevY = null;
+        let clickCooldown = 0;
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults((results) => {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                cursorElement.style.display = 'block';
+                const landmarks = results.multiHandLandmarks[0];
+                
+                // 只取食指指尖 (8) 作为精准光标
+                const indexTip = landmarks[8];
+                
+                // 摄像头镜像翻转 X 轴
+                let targetX = (1 - indexTip.x) * width;
+                let targetY = indexTip.y * height;
+
+                // 平滑滤波，让光标移动极其精准平滑，不再抖动
+                smoothedX += (targetX - smoothedX) * 0.35;
+                smoothedY += (targetY - smoothedY) * 0.35;
+                
+                cursorElement.style.left = smoothedX + 'px';
+                cursorElement.style.top = smoothedY + 'px';
+                
+                // 检测“凌空点击”：当食指向前猛戳屏幕 (Z轴迅速变小) 或者 快速向下点 (Y轴迅速变大)
+                let isClicking = false;
+                if (prevZ !== null && prevY !== null) {
+                    let dz = indexTip.z - prevZ;
+                    let dy = indexTip.y - prevY;
+                    
+                    // 当食指指尖有一个显著的点击趋势距离且处于伸出状态(z < -0.02)
+                    if ((dz < -0.015 || dy > 0.02) && clickCooldown <= 0 && indexTip.z < -0.02) {
+                        isClicking = true;
+                        clickCooldown = 15; // 给一个冷却时间，防止连点
+                    }
+                }
+                prevZ = indexTip.z;
+                prevY = indexTip.y;
+                if (clickCooldown > 0) clickCooldown--;
+                
+                if (isClicking) {
+                    cursorElement.classList.add('pinched'); // 共用css动画显示点击高亮
+                    // 触发精准打击：检测中心刚好落在哪个泡泡内
+                    for (let i = 0; i < nodes.length; i++) {
+                        let n = nodes[i];
+                        let dxNode = smoothedX - n.x;
+                        let dyNode = smoothedY - n.y;
+                        if (Math.sqrt(dxNode*dxNode + dyNode*dyNode) <= n.r) {
+                            burstBubble(n);
+                            break; // 每次精准点破一个
+                        }
+                    }
+                } else if (clickCooldown === 0) {
+                    cursorElement.classList.remove('pinched');
+                }
+            } else {
+                cursorElement.style.display = 'none';
+            }
+        });
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        camera.start();
+
+    </script>
+</body>
+</html>
